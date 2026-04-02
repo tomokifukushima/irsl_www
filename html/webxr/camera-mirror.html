@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>カメラミラーリング</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { 
+    height: 100%; 
+    margin: 0; 
+    background: #1a1a1a; 
+    color: #fff; 
+    font-family: 'Courier New', monospace;
+    display: flex;
+    flex-direction: column;
+  }
+  
+  #header {
+    background: #0a0a0a;
+    border-bottom: 2px solid #00ff00;
+    padding: 15px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  
+  #header h1 {
+    margin: 0;
+    font-size: 18px;
+    color: #00ff00;
+  }
+  
+  #header .info {
+    font-size: 12px;
+    color: #aaa;
+    display: flex;
+    gap: 20px;
+  }
+  
+  #container {
+    display: flex;
+    flex: 1;
+    gap: 10px;
+    padding: 10px;
+    flex-wrap: wrap;
+  }
+  
+  .section {
+    flex: 1 1 300px;
+    display: flex;
+    flex-direction: column;
+    background: #2a2a2a;
+    border: 2px solid #444;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  
+  .section h2 {
+    margin: 0;
+    padding: 10px;
+    background: #1a1a1a;
+    border-bottom: 1px solid #444;
+    font-size: 14px;
+    color: #00ff00;
+  }
+  
+  .section-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 10px;
+  }
+  
+  #senderVideo, #receiverCanvas {
+    flex: 1;
+    background: #000;
+    border-radius: 4px;
+    margin-bottom: 10px;
+    object-fit: contain;
+  }
+
+  .mono {
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  
+  .controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  
+  button {
+    padding: 8px 12px;
+    background: #0066cc;
+    color: #fff;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    font-weight: bold;
+    font-size: 12px;
+    font-family: 'Courier New', monospace;
+  }
+  
+  button:hover { background: #0052a3; }
+  button:disabled { background: #666; cursor: not-allowed; }
+  
+  select {
+    padding: 6px 8px;
+    background: #333;
+    color: #fff;
+    border: 1px solid #555;
+    border-radius: 3px;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+  }
+  
+  .status {
+    font-size: 11px;
+    color: #aaa;
+    margin-top: 8px;
+    padding: 6px;
+    background: #1a1a1a;
+    border-radius: 3px;
+    border: 1px solid #444;
+    max-height: 100px;
+    overflow-y: auto;
+  }
+  
+  .status-ok { color: #00ff00; }
+  .status-warn { color: #ffff00; }
+  .status-error { color: #ff4444; }
+  
+  .stat-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 0;
+    border-bottom: 1px solid #333;
+  }
+  
+  .stat-label { color: #888; }
+  .stat-value { color: #fff; }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <div>
+    <h1>📹 カメラミラーリングシステム</h1>
+  </div>
+  <div class="info">
+    <div id="wsStatus">WS: 接続待機</div>
+    <div id="fpsInfo">FPS: 0</div>
+  </div>
+</div>
+
+<div id="container">
+  <!-- 送信側（HMD側） -->
+  <div class="section">
+    <h2>📤 送信側（カメラ取得）</h2>
+    <div class="section-content">
+      <select id="cameraSelect" disabled>
+        <option value="">カメラを選択...</option>
+      </select>
+      <video id="senderVideo" playsinline autoplay muted></video>
+      <div class="controls">
+        <button id="startSendBtn">開始</button>
+        <button id="stopSendBtn" disabled>停止</button>
+      </div>
+      <div class="status">
+        <div class="stat-item">
+          <span class="stat-label">状態:</span>
+          <span id="senderStatus" class="stat-value">停止</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">フレーム:</span>
+          <span id="senderFrameCount" class="stat-value">0</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">解像度:</span>
+          <span id="senderResolution" class="stat-value">-</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">バイト:</span>
+          <span id="senderBytes" class="stat-value">0 KB</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 受信側（ダッシュボード） -->
+  <div class="section">
+    <h2>📥 受信側（ミラー表示）</h2>
+    <div class="section-content">
+      <canvas id="receiverCanvas"></canvas>
+      <div class="controls">
+        <button id="clearCanvasBtn">クリア</button>
+        <button id="downloadImageBtn" disabled>画像保存</button>
+      </div>
+      <div class="status">
+        <div class="stat-item">
+          <span class="stat-label">状態:</span>
+          <span id="receiverStatus" class="stat-value">待機</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">フレーム:</span>
+          <span id="receiverFrameCount" class="stat-value">0</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">最終更新:</span>
+          <span id="lastUpdateTime" class="stat-value">-</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">遅延:</span>
+          <span id="latencyMs" class="stat-value">- ms</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">ドロップ:</span>
+          <span id="droppedFrames" class="stat-value">0</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- コントローラ情報 -->
+  <div class="section">
+    <h2>🎮 コントローラ情報</h2>
+    <div class="section-content">
+      <div class="controls" style="margin-bottom:6px;">
+        <button id="startXRBtn">XRセッション開始</button>
+        <span id="xrStatus" class="stat-value">XR: 未開始</span>
+      </div>
+      <div class="status">
+        <div class="stat-item">
+          <span class="stat-label">接続数:</span>
+          <span id="controllerCount" class="stat-value">0</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">左スティック:</span>
+          <span id="leftStick" class="stat-value">0.000 / 0.000</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">右スティック:</span>
+          <span id="rightStick" class="stat-value">0.000 / 0.000</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">位置(x,y,z):</span>
+          <span id="posePos" class="stat-value">-</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">向き(x,y,z,w):</span>
+          <span id="poseOri" class="stat-value">-</span>
+        </div>
+      </div>
+      <div class="status mono" style="margin-top:8px; max-height:160px;">
+        <div class="stat-label" style="color:#888;">ボタン状態:</div>
+        <div id="buttonList">(未検出)</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- roslibjs (ROS Bridge経由で画像送信するため) -->
+<script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
+<script src="camera-mirror.js"></script>
+</body>
+</html>
