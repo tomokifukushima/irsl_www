@@ -61,6 +61,53 @@
       background: rgba(0, 0, 0, 0.25);
       white-space: pre-wrap;
     }
+    .camera-panel {
+      margin-top: 16px;
+      padding: 14px;
+      border-radius: 12px;
+      background: rgba(0, 0, 0, 0.22);
+    }
+    .camera-panel h2 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+    }
+    .camera-panel select {
+      width: 100%;
+      margin-bottom: 10px;
+      padding: 10px 12px;
+      border: 0;
+      border-radius: 10px;
+      font-size: 0.95rem;
+      background: rgba(255, 255, 255, 0.9);
+      color: #101820;
+    }
+    .camera-actions {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    #startCameraButton { background: #17935a; color: white; }
+    #stopCameraButton { background: #6f4a4a; color: white; }
+    #cameraPreview {
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      border-radius: 10px;
+      background: #000;
+      object-fit: cover;
+    }
+    #cameraStatus {
+      margin: 10px 0 0;
+      font-size: 0.9rem;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+    .camera-metrics {
+      margin-top: 10px;
+      font-size: 0.85rem;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      color: rgba(245, 247, 251, 0.88);
+    }
     #header-contents {
       margin: 12px 0 0;
       font-size: 0.92rem;
@@ -106,6 +153,19 @@
       <button id="endButton" disabled>終了</button>
     </div>
     <p id="status">初期化中...</p>
+    <section class="camera-panel">
+      <h2>外カメラ送信</h2>
+      <select id="cameraSelect" disabled>
+        <option value="">カメラを選択...</option>
+      </select>
+      <div class="camera-actions">
+        <button id="startCameraButton" disabled>カメラ開始</button>
+        <button id="stopCameraButton" disabled>停止</button>
+      </div>
+      <video id="cameraPreview" playsinline autoplay muted></video>
+      <p id="cameraStatus">カメラ初期化中...</p>
+      <p id="cameraMetrics" class="camera-metrics">送信先: /hmd/camera/compressed</p>
+    </section>
     <div id="header-contents"></div>
   </main>
   <section id="xrOverlay" hidden>

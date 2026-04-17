@@ -5,6 +5,12 @@ async function main_func() {
     const status = document.getElementById('status');//ステータス表示のidを取得
     const overlay = document.getElementById('xrOverlay');
     const controllerInfo = document.getElementById('controllerInfo');
+    const cameraSelect = document.getElementById('cameraSelect');
+    const startCameraButton = document.getElementById('startCameraButton');
+    const stopCameraButton = document.getElementById('stopCameraButton');
+    const cameraPreview = document.getElementById('cameraPreview');
+    const cameraStatus = document.getElementById('cameraStatus');
+    const cameraMetrics = document.getElementById('cameraMetrics');
     const canvas = document.getElementById('xrCanvas');//キャンバスの要素idを取得
 
     let xrSession = null;
@@ -18,7 +24,13 @@ async function main_func() {
     let leftPositionTopic = null;
     let rightButtonTopic = null;
     let leftButtonTopic = null;
+    let cameraImageTopic = null;
     let lastPublishTime = 0;
+    let cameraStream = null;
+    let cameraFrameRequestId = null;
+    let selectedCameraId = '';
+    let lastCameraPublishTime = 0;
+    let sentCameraFrames = 0;
 
     ///////////// ROS関連の基本設定 ////////////
     const publishIntervalMs = 200;//ROSにコントローラ情報を送る間隔（ミリ秒）
@@ -26,6 +38,9 @@ async function main_func() {
     const leftPositionTopicName = '/webxr/controller_state/left_con/position';//左コントローラ位置
     const rightButtonTopicName = '/webxr/controller_state/right_con/button_a';//右Aボタン
     const leftButtonTopicName = '/webxr/controller_state/left_con/button_x';//左Xボタン
+    const cameraImageTopicName = '/hmd/camera/compressed';//HMD外カメラ画像
+    const cameraPublishIntervalMs = 100;//カメラ送信間隔（10FPS）
+    const cameraJpegQuality = 0.6;
     ///////////////////////////////////////
 
     function setStatus(message) {//メッセージ表示用関数
@@ -39,6 +54,14 @@ async function main_func() {
 
     function setControllerInfo(message) {
         controllerInfo.textContent = message;
+    }
+
+    function setCameraStatus(message) {
+        cameraStatus.textContent = message;
+    }
+
+    function setCameraMetrics(message) {
+        cameraMetrics.textContent = message;
     }
 
     function formatValue(value) {
@@ -65,6 +88,132 @@ async function main_func() {
             touched: Boolean(button?.touched),
             value: Number(formatValue(button?.value))
         };
+    }
+
+    async function ensureCameraPermission() {
+        try {
+            const tempStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            tempStream.getTracks().forEach((track) => track.stop());
+            return true;
+        } catch (error) {
+            console.warn('[get_test] camera permission failed', error);
+            setCameraStatus(`カメラ権限エラー: ${error.name}`);
+            return false;
+        }
+    }
+
+    async function enumerateCameras() {
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const cameras = devices.filter((device) => device.kind === 'videoinput');
+            cameraSelect.innerHTML = '<option value="">カメラを選択...</option>';
+            cameras.forEach((device, index) => {
+                const option = document.createElement('option');
+                option.value = device.deviceId;
+                option.textContent = device.label || `カメラ ${index + 1}`;
+                cameraSelect.appendChild(option);
+            });
+
+            if (!cameras.length) {
+                setCameraStatus('利用できるカメラが見つかりません');
+                return;
+            }
+
+            selectedCameraId = cameras[0].deviceId;
+            cameraSelect.value = selectedCameraId;
+            cameraSelect.disabled = false;
+            startCameraButton.disabled = false;
+            setCameraStatus(`カメラ準備完了: ${cameras.length} 台`);
+        } catch (error) {
+            console.error('[get_test] enumerate cameras failed', error);
+            setCameraStatus(`カメラ列挙失敗: ${error.message}`);
+        }
+    }
+
+    function stopCameraStream() {
+        if (cameraFrameRequestId) {
+            cancelAnimationFrame(cameraFrameRequestId);
+            cameraFrameRequestId = null;
+        }
+        if (cameraStream) {
+            cameraStream.getTracks().forEach((track) => track.stop());
+            cameraStream = null;
+        }
+        cameraPreview.srcObject = null;
+        startCameraButton.disabled = !selectedCameraId;
+        stopCameraButton.disabled = true;
+        cameraSelect.disabled = false;
+        setCameraStatus('カメラ停止');
+    }
+
+    function publishCameraFrame() {
+        if (!cameraStream || !cameraImageTopic || !cameraPreview.videoWidth || !cameraPreview.videoHeight) {
+            cameraFrameRequestId = requestAnimationFrame(publishCameraFrame);
+            return;
+        }
+
+        const now = performance.now();
+        if (now - lastCameraPublishTime < cameraPublishIntervalMs) {
+            cameraFrameRequestId = requestAnimationFrame(publishCameraFrame);
+            return;
+        }
+        lastCameraPublishTime = now;
+
+        const frameCanvas = document.createElement('canvas');
+        frameCanvas.width = cameraPreview.videoWidth;
+        frameCanvas.height = cameraPreview.videoHeight;
+        const frameContext = frameCanvas.getContext('2d');
+        frameContext.drawImage(cameraPreview, 0, 0);
+
+        frameCanvas.toBlob(async (blob) => {
+            if (!blob || !cameraImageTopic || !cameraStream) {
+                return;
+            }
+            const buffer = await blob.arrayBuffer();
+            const msg = new ROSLIB.Message({
+                format: 'jpeg',
+                data: Array.from(new Uint8Array(buffer))
+            });
+            cameraImageTopic.publish(msg);
+
+            sentCameraFrames += 1;
+            setCameraMetrics(`送信先: ${cameraImageTopicName}\n解像度: ${frameCanvas.width}x${frameCanvas.height}\n送信FPS: ${(1000 / cameraPublishIntervalMs).toFixed(1)}\n送信フレーム: ${sentCameraFrames}`);
+        }, 'image/jpeg', cameraJpegQuality);
+
+        cameraFrameRequestId = requestAnimationFrame(publishCameraFrame);
+    }
+
+    async function startCameraStream() {
+        if (!selectedCameraId) {
+            setCameraStatus('カメラを選択してください');
+            return;
+        }
+        if (!cameraImageTopic) {
+            setCameraStatus('ROS 未接続: 画像 topic を作成できません');
+            return;
+        }
+        try {
+            stopCameraStream();
+            setCameraStatus('カメラ開始中...');
+            cameraStream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    deviceId: { exact: selectedCameraId }
+                },
+                audio: false
+            });
+            cameraPreview.srcObject = cameraStream;
+            cameraSelect.disabled = true;
+            startCameraButton.disabled = true;
+            stopCameraButton.disabled = false;
+            sentCameraFrames = 0;
+            setCameraStatus('カメラ送信中');
+            publishCameraFrame();
+        } catch (error) {
+            console.error('[get_test] start camera failed', error);
+            setCameraStatus(`カメラ開始失敗: ${error.name}`);
+            startCameraButton.disabled = !selectedCameraId;
+            stopCameraButton.disabled = true;
+        }
     }
 
     // WebXRの生データを、画面表示とROS送信の両方で使う共通JSONにまとめる。
@@ -287,6 +436,12 @@ async function main_func() {
 
     startButton.addEventListener('click', startSession);
     endButton.addEventListener('click', () => xrSession?.end());
+    cameraSelect.addEventListener('change', (event) => {
+        selectedCameraId = event.target.value;
+        startCameraButton.disabled = !selectedCameraId;
+    });
+    startCameraButton.addEventListener('click', startCameraStream);
+    stopCameraButton.addEventListener('click', stopCameraStream);
 
     // URLパラメータから rosbridge に接続し、publish先 topic をここで作る。
     if (typeof ros_start === 'function' && typeof ROSLIB !== 'undefined') {
@@ -312,11 +467,26 @@ async function main_func() {
                 name: leftButtonTopicName,
                 messageType: 'std_msgs/Bool'
             });
+            cameraImageTopic = new ROSLIB.Topic({
+                ros,
+                name: cameraImageTopicName,
+                messageType: 'sensor_msgs/CompressedImage'
+            });
             setStatus(`準備中: ${rightPositionTopicName}, ${leftPositionTopicName}, ${rightButtonTopicName}, ${leftButtonTopicName}`);
+            setCameraMetrics(`送信先: ${cameraImageTopicName}`);
         }
     }
 
     // このブラウザがAR/VRセッションを開始できるかを最初に判定する。
+    if (navigator.mediaDevices?.getUserMedia) {
+        const cameraPermissionOk = await ensureCameraPermission();
+        if (cameraPermissionOk) {
+            await enumerateCameras();
+        }
+    } else {
+        setCameraStatus('MediaDevices API 非対応です');
+    }
+
     sessionMode = await detectSessionMode();
     overlay.addEventListener('beforexrselect', (event) => event.preventDefault());
     if (!sessionMode) {
