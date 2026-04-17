@@ -6,6 +6,7 @@
 # NETWORK_MODE (default: host)
 # ROS_MASTER_URI ## pass to rosbridge
 # ROS_HOSTNAME ## pass to rosbridge
+# ROS_IP ## pass to rosbridge
 # REPO (default: repo.irsl.eiiris.tut.ac.jp/)
 # SUFFIX (default: noetic)
 # ROOT_DIR (default: $PWD)
@@ -36,7 +37,9 @@ services:
       - webserver
     command: [ "/runshell/run_rosbridge_ssl.sh", "${BRIDGE_MASTER:-$ROS_MASTER_URI}", "${BRIDGE_HOSTNAME:-0.0.0.0}", "${BRIDGE_PORT:-9990}" ]
     environment:
-      - ROS_HOSTNAME=${ROS_HOSTNAME:-localhost}
+      - ROS_HOSTNAME=${ROS_HOSTNAME:-}
+      - ROS_IP=${ROS_IP:-}
+      - ROS_MASTER_URI=${ROS_MASTER_URI:-}
     volumes:
       - "${ROOT_DIR:-$PWD}/userdir/server.key:/irsl_security/server.key"
       - "${ROOT_DIR:-$PWD}/userdir/server.crt:/irsl_security/server.crt"

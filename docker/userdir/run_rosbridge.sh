@@ -4,8 +4,7 @@ _ROSMASTER=${1:-"http://localhost:11311"}
 _ADDRESS=${2:-simserver.irsl.eiiris.tut.ac.jp}
 _PORT=${3:-9990}
 
-unset ROS_IP
-if [ -z "$ROS_HOSTNAME" ]; then
+if [ -z "$ROS_HOSTNAME" ] && [ -z "$ROS_IP" ]; then
     export ROS_HOSTNAME=${_ADDRESS}
 fi
 export ROS_MASTER_URI=${_ROSMASTER}
