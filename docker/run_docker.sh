@@ -34,6 +34,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ -z "${ROS_MASTER_URI}" ]]; then
+    if [[ -n "${ROS_HOSTNAME}" ]]; then
+        export ROS_MASTER_URI="http://${ROS_HOSTNAME}:11311"
+    elif [[ -n "${ROS_IP}" ]]; then
+        export ROS_MASTER_URI="http://${ROS_IP}:11311"
+    fi
+fi
+
 sig_hdl () {
     echo "catch signal $1"
     kill -INT ${COMP_PID}
