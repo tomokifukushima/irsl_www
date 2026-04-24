@@ -20,17 +20,27 @@ async function main_func() {
     let lastStatusMessage = '';
     let domOverlayType = null;
     let ros = null;
+    let xrGlBinding = null;
     let rightPositionTopic = null;
     let leftPositionTopic = null;
     let rightButtonTopic = null;
     let leftButtonTopic = null;
     let cameraImageTopic = null;
+    let cameraSourceTopic = null;
     let lastPublishTime = 0;
     let cameraStream = null;
     let cameraFrameRequestId = null;
     let selectedCameraId = '';
     let lastCameraPublishTime = 0;
     let sentCameraFrames = 0;
+    let rawCameraAccessRequested = false;
+    let rawCameraAccessActive = false;
+    let rawCameraAnnounced = false;
+    let rawCameraReadback = null;
+    let rawCameraDetectStartTime = 0;
+    let rawCameraFallbackTriggered = false;
+    let rawCameraLastSuccessTime = 0;
+    let lastCameraStatusMessage = '';
 
     ///////////// ROS関連の基本設定 ////////////
     const publishIntervalMs = 200;//ROSにコントローラ情報を送る間隔（ミリ秒）
@@ -39,9 +49,237 @@ async function main_func() {
     const rightButtonTopicName = '/webxr/controller_state/right_con/button_a';//右Aボタン
     const leftButtonTopicName = '/webxr/controller_state/left_con/button_x';//左Xボタン
     const cameraImageTopicName = '/hmd/camera/compressed';//HMD外カメラ画像
+    const cameraSourceTopicName = '/hmd/camera/source';//カメラ入力ソース種別
+    const cameraFrameId = 'hmd_camera';
     const cameraPublishIntervalMs = 100;//カメラ送信間隔（10FPS）
     const cameraJpegQuality = 0.6;
+    const rawCameraFallbackTimeoutMs = 3000;
+    const rawCameraStallTimeoutMs = 1500;
     ///////////////////////////////////////
+
+    function buildRosStamp() {
+        const nowMs = Date.now();
+        const secs = Math.floor(nowMs / 1000);
+        const nsecs = Math.floor((nowMs % 1000) * 1000000);
+        return { secs, nsecs };
+    }
+
+    function buildCameraHeader() {
+        return {
+            stamp: buildRosStamp(),
+            frame_id: cameraFrameId
+        };
+    }
+
+    function publishCameraSource(sourceName) {
+        if (!cameraSourceTopic) {
+            return;
+        }
+        cameraSourceTopic.publish(new ROSLIB.Message({
+            data: sourceName
+        }));
+    }
+
+    function supportsRawCameraAccess() {
+        return Boolean(
+            sessionMode === 'immersive-ar'
+            && typeof XRWebGLBinding !== 'undefined'
+            && typeof gl?.readPixels === 'function'
+        );
+    }
+
+    function initializeRawCameraReadback() {
+        if (!gl || rawCameraReadback) {
+            return rawCameraReadback;
+        }
+
+        const vertexSource = `
+            attribute vec2 a_position;
+            attribute vec2 a_texCoord;
+            varying vec2 v_texCoord;
+            void main() {
+                gl_Position = vec4(a_position, 0.0, 1.0);
+                v_texCoord = a_texCoord;
+            }
+        `;
+        const fragmentSource = `
+            precision mediump float;
+            varying vec2 v_texCoord;
+            uniform sampler2D u_texture;
+            void main() {
+                gl_FragColor = texture2D(u_texture, vec2(v_texCoord.x, 1.0 - v_texCoord.y));
+            }
+        `;
+
+        function compileShader(type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                const info = gl.getShaderInfoLog(shader);
+                gl.deleteShader(shader);
+                throw new Error(`shader compile failed: ${info}`);
+            }
+            return shader;
+        }
+
+        const vertexShader = compileShader(gl.VERTEX_SHADER, vertexSource);
+        const fragmentShader = compileShader(gl.FRAGMENT_SHADER, fragmentSource);
+        const program = gl.createProgram();
+        gl.attachShader(program, vertexShader);
+        gl.attachShader(program, fragmentShader);
+        gl.linkProgram(program);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            const info = gl.getProgramInfoLog(program);
+            gl.deleteProgram(program);
+            throw new Error(`program link failed: ${info}`);
+        }
+        gl.deleteShader(vertexShader);
+        gl.deleteShader(fragmentShader);
+
+        const buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+            -1, -1, 0, 0,
+             1, -1, 1, 0,
+            -1,  1, 0, 1,
+             1,  1, 1, 1
+        ]), gl.STATIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+        const framebuffer = gl.createFramebuffer();
+        const outputTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, outputTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+
+        rawCameraReadback = {
+            program,
+            buffer,
+            framebuffer,
+            outputTexture,
+            positionLocation: gl.getAttribLocation(program, 'a_position'),
+            texCoordLocation: gl.getAttribLocation(program, 'a_texCoord'),
+            textureLocation: gl.getUniformLocation(program, 'u_texture'),
+            width: 0,
+            height: 0,
+            pixels: null,
+            canvas: document.createElement('canvas'),
+            context2d: null,
+            imageData: null
+        };
+        rawCameraReadback.canvas.width = 1;
+        rawCameraReadback.canvas.height = 1;
+        rawCameraReadback.context2d = rawCameraReadback.canvas.getContext('2d', { willReadFrequently: true });
+        return rawCameraReadback;
+    }
+
+    async function publishRawCameraTexture(view) {
+        if (!cameraImageTopic || !xrGlBinding || !view?.camera) {
+            return false;
+        }
+
+        const now = performance.now();
+        if (now - lastCameraPublishTime < cameraPublishIntervalMs) {
+            return true;
+        }
+
+        const readback = initializeRawCameraReadback();
+        const cameraTexture = xrGlBinding.getCameraImage(view.camera);
+        if (!cameraTexture) {
+            return false;
+        }
+
+        const width = view.camera.width;
+        const height = view.camera.height;
+        if (!width || !height) {
+            return false;
+        }
+
+        if (readback.width !== width || readback.height !== height) {
+            readback.width = width;
+            readback.height = height;
+            readback.pixels = new Uint8Array(width * height * 4);
+            readback.canvas.width = width;
+            readback.canvas.height = height;
+            readback.imageData = readback.context2d.createImageData(width, height);
+
+            gl.bindTexture(gl.TEXTURE_2D, readback.outputTexture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            gl.bindTexture(gl.TEXTURE_2D, null);
+        }
+
+        const previousFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+        const previousProgram = gl.getParameter(gl.CURRENT_PROGRAM);
+        const previousArrayBuffer = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
+        const previousActiveTexture = gl.getParameter(gl.ACTIVE_TEXTURE);
+        const previousTexture = gl.getParameter(gl.TEXTURE_BINDING_2D);
+        const previousViewport = gl.getParameter(gl.VIEWPORT);
+
+        gl.bindFramebuffer(gl.FRAMEBUFFER, readback.framebuffer);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, readback.outputTexture, 0);
+        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, previousFramebuffer);
+            return false;
+        }
+
+        gl.viewport(0, 0, width, height);
+        gl.useProgram(readback.program);
+        gl.bindBuffer(gl.ARRAY_BUFFER, readback.buffer);
+        gl.enableVertexAttribArray(readback.positionLocation);
+        gl.vertexAttribPointer(readback.positionLocation, 2, gl.FLOAT, false, 16, 0);
+        gl.enableVertexAttribArray(readback.texCoordLocation);
+        gl.vertexAttribPointer(readback.texCoordLocation, 2, gl.FLOAT, false, 16, 8);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, cameraTexture);
+        gl.uniform1i(readback.textureLocation, 0);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, readback.pixels);
+
+        gl.disableVertexAttribArray(readback.positionLocation);
+        gl.disableVertexAttribArray(readback.texCoordLocation);
+        gl.bindTexture(gl.TEXTURE_2D, previousTexture);
+        gl.activeTexture(previousActiveTexture);
+        gl.bindBuffer(gl.ARRAY_BUFFER, previousArrayBuffer);
+        gl.useProgram(previousProgram);
+        gl.viewport(previousViewport[0], previousViewport[1], previousViewport[2], previousViewport[3]);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, previousFramebuffer);
+
+        // readPixels は左下原点なので、2D canvas に上下反転して詰め直す。
+        const rowStride = width * 4;
+        for (let y = 0; y < height; y += 1) {
+            const sourceOffset = (height - 1 - y) * rowStride;
+            const targetOffset = y * rowStride;
+            readback.imageData.data.set(readback.pixels.subarray(sourceOffset, sourceOffset + rowStride), targetOffset);
+        }
+        readback.context2d.putImageData(readback.imageData, 0, 0);
+
+        const blob = await new Promise((resolve) => {
+            readback.canvas.toBlob(resolve, 'image/jpeg', cameraJpegQuality);
+        });
+        if (!blob) {
+            return false;
+        }
+
+        const buffer = await blob.arrayBuffer();
+        cameraImageTopic.publish(new ROSLIB.Message({
+            header: buildCameraHeader(),
+            format: 'jpeg',
+            data: Array.from(new Uint8Array(buffer))
+        }));
+        publishCameraSource('raw-camera-access');
+
+        lastCameraPublishTime = now;
+        rawCameraLastSuccessTime = now;
+        sentCameraFrames += 1;
+        rawCameraAccessActive = true;
+        setCameraStatus('XR camera-access 送信中');
+        setCameraMetrics(`送信先: ${cameraImageTopicName}\n入力: WebXR camera-access\n解像度: ${width}x${height}\n送信FPS: ${(1000 / cameraPublishIntervalMs).toFixed(1)}\n送信フレーム: ${sentCameraFrames}`);
+        return true;
+    }
 
     function setStatus(message) {//メッセージ表示用関数
         if (message === lastStatusMessage) {
@@ -57,6 +295,10 @@ async function main_func() {
     }
 
     function setCameraStatus(message) {
+        if (message === lastCameraStatusMessage) {
+            return;
+        }
+        lastCameraStatusMessage = message;
         cameraStatus.textContent = message;
     }
 
@@ -140,9 +382,10 @@ async function main_func() {
             cameraStream = null;
         }
         cameraPreview.srcObject = null;
-        startCameraButton.disabled = !selectedCameraId;
+        rawCameraAccessActive = false;
+        startCameraButton.disabled = rawCameraAnnounced || !selectedCameraId;
         stopCameraButton.disabled = true;
-        cameraSelect.disabled = false;
+        cameraSelect.disabled = rawCameraAnnounced;
         setCameraStatus('カメラ停止');
     }
 
@@ -171,10 +414,12 @@ async function main_func() {
             }
             const buffer = await blob.arrayBuffer();
             const msg = new ROSLIB.Message({
+                header: buildCameraHeader(),
                 format: 'jpeg',
                 data: Array.from(new Uint8Array(buffer))
             });
             cameraImageTopic.publish(msg);
+            publishCameraSource('getusermedia');
 
             sentCameraFrames += 1;
             setCameraMetrics(`送信先: ${cameraImageTopicName}\n解像度: ${frameCanvas.width}x${frameCanvas.height}\n送信FPS: ${(1000 / cameraPublishIntervalMs).toFixed(1)}\n送信フレーム: ${sentCameraFrames}`);
@@ -195,6 +440,7 @@ async function main_func() {
         try {
             stopCameraStream();
             setCameraStatus('カメラ開始中...');
+            rawCameraAccessActive = false;
             cameraStream = await navigator.mediaDevices.getUserMedia({
                 video: {
                     deviceId: { exact: selectedCameraId }
@@ -359,10 +605,20 @@ async function main_func() {
     function onSessionEnded() {//セッション終了時の処理
         xrSession = null;
         xrRefSpace = null;
+        xrGlBinding = null;
         domOverlayType = null;
+        rawCameraAccessRequested = false;
+        rawCameraAccessActive = false;
+        rawCameraAnnounced = false;
+        rawCameraDetectStartTime = 0;
+        rawCameraFallbackTriggered = false;
+        rawCameraLastSuccessTime = 0;
         overlay.hidden = true;
         startButton.disabled = false;//スタートボタンを有効にする
         endButton.disabled = true;//エンドボタンを無効にする
+        startCameraButton.disabled = !selectedCameraId;
+        stopCameraButton.disabled = !cameraStream;
+        cameraSelect.disabled = Boolean(cameraStream);
         setControllerInfo('コントローラ待機中...');
         setStatus('セッション終了');
     }
@@ -382,6 +638,45 @@ async function main_func() {
         const pose = xrRefSpace ? frame.getViewerPose(xrRefSpace) : null;
         if (pose) {
             setStatus(`セッション中: ${sessionMode} / view=${pose.views.length} / overlay=${domOverlayType || 'none'}`);
+            if (rawCameraAccessRequested && pose.views.length) {
+                const rawCameraView = pose.views.find((view) => view.camera);
+                if (rawCameraView) {
+                    if (rawCameraFallbackTriggered) {
+                        setCameraStatus('getUserMedia フォールバック中（raw camera-access は使用しません）');
+                    } else {
+                    if (!rawCameraAnnounced) {
+                        if (cameraStream) {
+                            stopCameraStream();
+                        }
+                        rawCameraAnnounced = true;
+                        rawCameraLastSuccessTime = performance.now();
+                        startCameraButton.disabled = true;
+                        stopCameraButton.disabled = true;
+                        cameraSelect.disabled = true;
+                        setCameraStatus('XR camera-access を検出しました');
+                    }
+                    publishRawCameraTexture(rawCameraView).catch((error) => {
+                        console.error('[get_test] raw camera publish failed', error);
+                        setCameraStatus(`XR camera-access 失敗: ${error.message}`);
+                    });
+                    const rawStalledMs = performance.now() - rawCameraLastSuccessTime;
+                    if (!cameraStream && rawCameraAnnounced && rawStalledMs >= rawCameraStallTimeoutMs) {
+                        rawCameraFallbackTriggered = true;
+                        setCameraStatus('XR raw camera が停止したため getUserMedia に自動フォールバックします');
+                        startCameraStream();
+                    }
+                    }
+                } else if (rawCameraAccessRequested && !rawCameraAnnounced) {
+                    const elapsed = performance.now() - rawCameraDetectStartTime;
+                    if (!rawCameraFallbackTriggered && elapsed >= rawCameraFallbackTimeoutMs) {
+                        rawCameraFallbackTriggered = true;
+                        setCameraStatus('XR camera-access 未取得のため getUserMedia に自動フォールバックします');
+                        startCameraStream();
+                    } else if (!rawCameraFallbackTriggered) {
+                        setCameraStatus('XR camera-access 要求中: view.camera 待機');
+                    }
+                }
+            }
         }
         setControllerInfo(buildControllerText(frame, session));//コントローラ情報を画面表示用テキストに変換して表示
         publishControllerState(frame, session);//ROSにコントローラ情報を送る
@@ -394,6 +689,15 @@ async function main_func() {
         const sessionInit = {
             optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking', 'dom-overlay']
         };
+        rawCameraAccessRequested = sessionMode === 'immersive-ar';
+        rawCameraAccessActive = false;
+        rawCameraAnnounced = false;
+        rawCameraDetectStartTime = performance.now();
+        rawCameraFallbackTriggered = false;
+        rawCameraLastSuccessTime = 0;
+        if (rawCameraAccessRequested) {
+            sessionInit.optionalFeatures.push('camera-access');
+        }
         if (overlay) {
             sessionInit.domOverlay = { root: overlay };
         }
@@ -406,6 +710,7 @@ async function main_func() {
         if (gl.makeXRCompatible) {
             await gl.makeXRCompatible();
         }
+        xrGlBinding = supportsRawCameraAccess() ? new XRWebGLBinding(xrSession, gl) : null;
 
         xrSession.updateRenderState({
             baseLayer: new XRWebGLLayer(xrSession, gl)
@@ -423,6 +728,9 @@ async function main_func() {
 
         startButton.disabled = true;
         endButton.disabled = false;
+        if (rawCameraAccessRequested) {
+            setCameraStatus('XR camera-access を試行します。未対応なら通常カメラ操作に戻ります');
+        }
         setStatus(`セッション開始: ${sessionMode} / overlay=${domOverlayType || 'none'}`);
         xrSession.requestAnimationFrame(onXRFrame);
         } catch (error) {
@@ -472,8 +780,13 @@ async function main_func() {
                 name: cameraImageTopicName,
                 messageType: 'sensor_msgs/CompressedImage'
             });
+            cameraSourceTopic = new ROSLIB.Topic({
+                ros,
+                name: cameraSourceTopicName,
+                messageType: 'std_msgs/String'
+            });
             setStatus(`準備中: ${rightPositionTopicName}, ${leftPositionTopicName}, ${rightButtonTopicName}, ${leftButtonTopicName}`);
-            setCameraMetrics(`送信先: ${cameraImageTopicName}`);
+            setCameraMetrics(`送信先: ${cameraImageTopicName}\nsource送信先: ${cameraSourceTopicName}`);
         }
     }
 
@@ -498,6 +811,9 @@ async function main_func() {
 
     startButton.textContent = 'セッション開始';
     startButton.disabled = false;
+    if (sessionMode === 'immersive-ar' && typeof XRWebGLBinding !== 'undefined') {
+        setCameraStatus('camera-access 対応候補あり。XR開始時に raw camera を試します');
+    }
     setStatus(`準備完了: ${sessionMode}`);
 }
 
